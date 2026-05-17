@@ -8,6 +8,7 @@ import re
 import signal
 import sys
 import time
+import webbrowser
 from collections.abc import Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -22,7 +23,13 @@ import typer
 from pydantic import BaseModel, ValidationError
 
 from piranesi import __version__
-from piranesi.adapters import NmapParseError, parse_external_tool_file, parse_nmap_xml_file
+from piranesi.adapters import (
+    NmapParseError,
+    NucleiParseError,
+    parse_external_tool_file,
+    parse_nmap_xml_file,
+    parse_nuclei_jsonl_file,
+)
 from piranesi.audit import append_audit_event
 from piranesi.config import ConfigError, PiranesiConfig, load_config
 from piranesi.detect import (
@@ -212,6 +219,11 @@ from piranesi.workspace import (
 from piranesi.workspace import (
     append_audit_event as append_workspace_audit_event,
 )
+from piranesi.workspace_server import (
+    WorkspaceServerError,
+    create_workspace_server,
+    is_loopback_host,
+)
 
 _RUN_HELP = """Run the compatibility source-code security pipeline.
 
@@ -226,7 +238,7 @@ _ADVISORY_PROJECT_ROOT_HELP = "Project root used to resolve the default advisory
 
 app = typer.Typer(
     add_completion=False,
-    help="Local-first evidence workbench for host, app, and infrastructure security review.",
+    help="Local-first pentest and red-team report engine.",
     no_args_is_help=False,
     invoke_without_command=True,
 )
@@ -2493,6 +2505,94 @@ def ingest_nmap_command(
         )
 
 
+@ingest_app.command("nuclei", help="Ingest real nuclei JSONL into a pentest workspace.")
+def ingest_nuclei_command(
+    input_path: Annotated[
+        Path,
+        typer.Option(
+            "--input",
+            "-i",
+            exists=False,
+            dir_okay=False,
+            file_okay=True,
+            help="Real nuclei JSONL export to ingest.",
+        ),
+    ],
+    workspace: Annotated[
+        Path,
+        typer.Option(
+            "--workspace",
+            "-w",
+            dir_okay=True,
+            file_okay=False,
+            help="Workspace directory to create or update.",
+        ),
+    ] = Path("piranesi-workspace"),
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Print ingest summary as JSON."),
+    ] = False,
+) -> None:
+    if not input_path.is_file():
+        typer.echo(f"error: input file does not exist: {input_path}", err=True)
+        raise typer.Exit(code=2)
+
+    try:
+        state = create_workspace(workspace)
+        state, record = copy_tool_input(state, tool="nuclei", input_path=input_path)
+        raw_input_path = workspace_path(state.root, record.raw_path, allowed_roots=("raw",))
+        parse_result = parse_nuclei_jsonl_file(
+            raw_input_path,
+            input_sha256=record.sha256,
+            raw_path=record.raw_path,
+        )
+        state, record = copy_tool_input(
+            state,
+            tool="nuclei",
+            input_path=input_path,
+            metadata=parse_result.metadata,
+        )
+        before_ids = {finding.id for finding in state.findings.findings}
+        incoming_ids = {finding.id for finding in parse_result.findings}
+        state = upsert_findings(state, parse_result.findings)
+        output_digest = file_sha256(state.root / FINDINGS_FILE)
+        summary = {
+            "tool": "nuclei",
+            "created": len(incoming_ids - before_ids),
+            "updated": len(incoming_ids & before_ids),
+            "records": parse_result.metadata["valid_records"],
+            "findings": len(incoming_ids),
+            "warnings": parse_result.warnings,
+            "input_record": record.id,
+        }
+        append_workspace_audit_event(
+            state,
+            AuditEvent(
+                timestamp=utc_now(),
+                command="ingest nuclei",
+                input_path=record.raw_path,
+                input_sha256=record.sha256,
+                output_path=FINDINGS_FILE,
+                output_sha256=output_digest,
+                summary=summary,
+            ),
+        )
+    except (WorkspaceError, NucleiParseError) as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+
+    if json_output:
+        typer.echo(json.dumps(summary, indent=2, sort_keys=True))
+    else:
+        warning_count = len(parse_result.warnings)
+        typer.echo(
+            "Ingested nuclei JSONL: "
+            f"{summary['findings']} findings "
+            f"({summary['created']} created, {summary['updated']} updated, "
+            f"{warning_count} warnings)"
+        )
+
+
 @app.command("report", help="Generate pentest report artifacts from a workspace.")
 def pentest_report_command(
     workspace: Annotated[
@@ -2687,6 +2787,66 @@ def retest_command(
         typer.echo(json.dumps(payload, indent=2, sort_keys=True))
     else:
         typer.echo(f"retest: {output_path}")
+
+
+@app.command("serve", help="Preview a pentest workspace report on a local-only web UI.")
+def serve_command(
+    workspace: Annotated[
+        Path,
+        typer.Option(
+            "--workspace",
+            "-w",
+            dir_okay=True,
+            file_okay=False,
+            help="Workspace directory to preview.",
+        ),
+    ] = Path("piranesi-workspace"),
+    host: Annotated[
+        str,
+        typer.Option("--host", help="Bind host. Defaults to loopback for local-only preview."),
+    ] = "127.0.0.1",
+    port: Annotated[
+        int,
+        typer.Option("--port", "-p", min=0, max=65535, help="Bind port."),
+    ] = 8765,
+    unsafe_bind: Annotated[
+        bool,
+        typer.Option(
+            "--unsafe-bind",
+            help="Allow binding to a non-loopback host after printing a security warning.",
+        ),
+    ] = False,
+    open_browser: Annotated[
+        bool,
+        typer.Option("--open/--no-open", help="Open the preview URL in the default browser."),
+    ] = False,
+) -> None:
+    if not is_loopback_host(host):
+        warning = (
+            f"WARNING: {host} is not a loopback bind address. The workspace preview "
+            "may expose pentest evidence to the local network."
+        )
+        if not unsafe_bind:
+            typer.echo(f"error: {warning} Rerun with --unsafe-bind to acknowledge.", err=True)
+            raise typer.Exit(code=2)
+        typer.echo(warning, err=True)
+    try:
+        server = create_workspace_server(workspace, host=host, port=port)
+    except (WorkspaceError, WorkspaceServerError, OSError) as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+    address = server.server_address[0]
+    host_name = address.decode() if isinstance(address, bytes) else str(address)
+    url = f"http://{host_name}:{server.server_address[1]}"
+    typer.echo(f"serve: {url}")
+    if open_browser:
+        webbrowser.open(url)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
 
 
 @app.command(help="Print the shortest deterministic path to a useful first host report.")
