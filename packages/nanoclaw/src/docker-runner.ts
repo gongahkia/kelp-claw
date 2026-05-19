@@ -23,7 +23,7 @@ export class DockerNodeRunner implements NodeRunner {
 
   public buildCommand(
     node: CompiledDagNode,
-    context?: Pick<NodeRunContext, "attempt" | "workspace">
+    context?: Pick<NodeRunContext, "attempt" | "resolvedSecrets" | "workspace">
   ): readonly string[] {
     const nanoclawEnv: [string, string][] = context
       ? [
@@ -35,7 +35,12 @@ export class DockerNodeRunner implements NodeRunner {
           ["NANOCLAW_ATTEMPT", String(context.attempt)]
         ]
       : [];
-    const envArgs = [...Object.entries(node.runtime.environment), ...nanoclawEnv]
+    const resolvedSecrets = context ? Object.entries(context.resolvedSecrets) : [];
+    const envArgs = [
+      ...Object.entries(node.runtime.environment),
+      ...resolvedSecrets,
+      ...nanoclawEnv
+    ]
       .sort(([leftKey], [rightKey]) => leftKey.localeCompare(rightKey))
       .flatMap(([key, value]) => ["--env", `${key}=${value}`]);
 
@@ -181,5 +186,9 @@ async function listArtifactsInDirectory(
 }
 
 function dockerNetworkForNode(node: CompiledDagNode): "bridge" | "none" {
+  if (node.codegen) {
+    return node.codegen.sandbox.network === "declared" ? "bridge" : "none";
+  }
+
   return node.determinism.externalCalls.length > 0 || node.adapterId ? "bridge" : "none";
 }

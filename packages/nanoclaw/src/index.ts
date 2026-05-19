@@ -8,11 +8,13 @@ export {
   type AdapterRegistry
 } from "./adapter-policy.js";
 export { compileWorkflowDag, hashWorkflowDag, topologicalOrder } from "./compiler.js";
+export { DeterministicNodeRunner } from "./deterministic-runner.js";
 export { DockerNodeRunner } from "./docker-runner.js";
 export type { DockerNodeRunnerOptions } from "./docker-runner.js";
 export { executeCompiledDag } from "./executor.js";
 export type { ExecuteCompiledDagOptions } from "./executor.js";
 export { MockNodeRunner } from "./mock-runner.js";
+export { ProductionNodeRunner, type ProductionNodeRunnerOptions } from "./production-runner.js";
 export {
   NodePayloadValidationError,
   assertValidNodeInput,
@@ -21,6 +23,12 @@ export {
 export type { NodePayloadValidationIssue } from "./payload-validation.js";
 export { persistRunManifest, replayCompletedRun } from "./replay.js";
 export type { NanoClawRunManifest } from "./replay.js";
+export {
+  EnvironmentSecretResolver,
+  SecretStoreResolver,
+  secretEnvironmentName
+} from "./secrets.js";
+export type { SecretResolutionContext, SecretResolver, SecretValueStore } from "./secrets.js";
 export { createExecutionWorkspace, prepareNodeWorkspace } from "./workspace.js";
 export type { ExecutionWorkspaceOptions } from "./workspace.js";
 export type {

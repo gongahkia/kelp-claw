@@ -27,21 +27,41 @@ export {
   workflowIdFromPrompt
 } from "./graph.js";
 export { workflowJsonSchema } from "./json-schema.js";
-export { WorkflowMigrationError, migrateWorkflowToLatest } from "./migrations.js";
+export {
+  WorkflowMigrationError,
+  migrateWorkflowAdapterIdsToLive,
+  migrateWorkflowToLatest
+} from "./migrations.js";
+export {
+  redactJsonRecord,
+  redactJsonValue,
+  redactSecretString,
+  redactedValue
+} from "./redaction.js";
+export type { RedactionOptions } from "./redaction.js";
 export {
   jsonRecordSchema,
   jsonSchemaShapeSchema,
   jsonValueSchema,
   workflowAdapterOperationRefSchema,
   workflowApprovalRecordSchema,
+  workflowArtifactManifestRecordSchema,
+  workflowAuditActionSchema,
+  workflowAuditRecordSchema,
   workflowCodegenMetadataSchema,
   workflowDeterminismSchema,
   workflowEdgeSchema,
+  workflowEventSeveritySchema,
   workflowNodeSchema,
+  workflowObservabilityContextSchema,
+  workflowObservabilityEventKindSchema,
+  workflowObservabilityEventSchema,
   workflowPortRefSchema,
   workflowRuntimeResourcesSchema,
   workflowRuntimeRetrySchema,
   workflowRuntimeSchema,
+  workflowSpecDiffLineSchema,
+  workflowSpecDiffSchema,
   workflowSpecSchema
 } from "./schema.js";
 export {
@@ -67,6 +87,12 @@ export type {
   WorkflowApproveRequest,
   WorkflowApproveResponse,
   WorkflowApprovedRevision,
+  WorkflowArtifactManifestRecord,
+  WorkflowAuditAction,
+  WorkflowAuditAdapterCallRecord,
+  WorkflowAuditContainerRecord,
+  WorkflowAuditDeliveryRecord,
+  WorkflowAuditRecord,
   WorkflowCodegenArtifactContentType,
   WorkflowCodegenArtifactRef,
   WorkflowCodegenDependencyManifest,
@@ -81,12 +107,16 @@ export type {
   WorkflowDraftRevision,
   WorkflowDraftRevisionSource,
   WorkflowEdge,
+  WorkflowEventSeverity,
   WorkflowExecutionResult,
   WorkflowFetchRunResponse,
   WorkflowNode,
   WorkflowNodeExecutionAttempt,
   WorkflowNodeExecutionResult,
   WorkflowNodeKind,
+  WorkflowObservabilityContext,
+  WorkflowObservabilityEvent,
+  WorkflowObservabilityEventKind,
   WorkflowPlanRequest,
   WorkflowPlanResponse,
   WorkflowPortRef,

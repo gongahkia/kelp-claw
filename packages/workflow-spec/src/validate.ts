@@ -82,6 +82,7 @@ function validateWorkflowSemantics(workflow: WorkflowSpec): WorkflowValidationIs
     }
     nodeIds.add(node.id);
 
+    errors.push(...validateRuntimeImagePolicy(node, index));
     if (node.kind === "codegen" && !node.codegen) {
       errors.push({
         code: "WORKFLOW_CODEGEN_METADATA_MISSING",
@@ -141,6 +142,23 @@ function validateWorkflowSemantics(workflow: WorkflowSpec): WorkflowValidationIs
   return errors;
 }
 
+function validateRuntimeImagePolicy(
+  node: WorkflowSpec["nodes"][number],
+  nodeIndex: number
+): WorkflowValidationIssue[] {
+  if (runtimeImageIsPinned(node.runtime.image)) {
+    return [];
+  }
+
+  return [
+    {
+      code: "WORKFLOW_RUNTIME_IMAGE_POLICY_INVALID",
+      message: `Node '${node.id}' runtime image must be digest-addressed or pinned to an explicit non-latest tag.`,
+      path: ["nodes", nodeIndex, "runtime", "image"]
+    }
+  ];
+}
+
 function validateDeliveryChannelPolicy(
   node: WorkflowSpec["nodes"][number],
   nodeIndex: number
@@ -153,7 +171,7 @@ function validateDeliveryChannelPolicy(
   const errors: WorkflowValidationIssue[] = [];
 
   for (const channel of ["whatsapp", "telegram"] as const) {
-    const adapterId = `adapter.${channel}.fake`;
+    const adapterId = `adapter.${channel}`;
     if (adapterIds.has(adapterId) && !channels.has(channel)) {
       errors.push({
         code: "WORKFLOW_DELIVERY_CHANNEL_POLICY_INVALID",
@@ -315,6 +333,21 @@ function sandboxPolicyIsValid(
   return (
     sandbox.resources.cpu === resources.cpu && sandbox.resources.memoryMb === resources.memoryMb
   );
+}
+
+function runtimeImageIsPinned(image: string): boolean {
+  if (/^.+@sha256:[a-f0-9]{64}$/u.test(image)) {
+    return true;
+  }
+
+  const lastSlash = image.lastIndexOf("/");
+  const lastColon = image.lastIndexOf(":");
+  if (lastColon <= lastSlash || lastColon === image.length - 1) {
+    return false;
+  }
+
+  const tag = image.slice(lastColon + 1);
+  return tag !== "latest";
 }
 
 function hasCycle(workflow: WorkflowSpec): boolean {

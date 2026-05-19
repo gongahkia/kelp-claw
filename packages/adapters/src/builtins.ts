@@ -28,9 +28,34 @@ const defaultRetry = {
   retryableErrorCodes: ["RATE_LIMITED", "TEMPORARY_UNAVAILABLE"]
 } as const;
 
-const mockNetworkPolicy = {
+const noneNetworkPolicy = {
   mode: "none",
   allowedHosts: []
+} as const;
+
+const gmailNetworkPolicy = {
+  mode: "declared",
+  allowedHosts: ["oauth2.googleapis.com", "gmail.googleapis.com"]
+} as const;
+
+const sheetsNetworkPolicy = {
+  mode: "declared",
+  allowedHosts: ["oauth2.googleapis.com", "sheets.googleapis.com"]
+} as const;
+
+const smtpNetworkPolicy = {
+  mode: "declared",
+  allowedHosts: ["smtp"]
+} as const;
+
+const whatsappNetworkPolicy = {
+  mode: "declared",
+  allowedHosts: ["graph.facebook.com"]
+} as const;
+
+const telegramNetworkPolicy = {
+  mode: "declared",
+  allowedHosts: ["api.telegram.org"]
 } as const;
 
 const gmailSecret = secret("gmail.oauth", "OAuth token reference for Gmail scopes.");
@@ -41,9 +66,10 @@ const telegramSecret = secret("telegram.botToken", "Telegram bot token reference
 
 export const builtinAdapterMetadata = [
   adapter({
-    id: "adapter.gmail.fake",
+    id: "adapter.gmail",
     kind: "gmail",
-    displayName: "Mock Gmail",
+    displayName: "Gmail",
+    networkPolicy: gmailNetworkPolicy,
     capabilities: ["gmail.trigger", "gmail.receipts.search"],
     requiredSecrets: [gmailSecret],
     operations: [
@@ -71,9 +97,10 @@ export const builtinAdapterMetadata = [
     ]
   }),
   adapter({
-    id: "adapter.sheets.fake",
+    id: "adapter.sheets",
     kind: "sheets",
-    displayName: "Mock Google Sheets",
+    displayName: "Google Sheets",
+    networkPolicy: sheetsNetworkPolicy,
     capabilities: ["sheets.rows.append", "sheets.rows.update", "sheets.rows.lookup"],
     requiredSecrets: [sheetsSecret],
     operations: [
@@ -111,9 +138,10 @@ export const builtinAdapterMetadata = [
     ]
   }),
   adapter({
-    id: "adapter.email.fake",
+    id: "adapter.email",
     kind: "email",
-    displayName: "Mock Email Delivery",
+    displayName: "SMTP Email Delivery",
+    networkPolicy: smtpNetworkPolicy,
     capabilities: ["email.approval.request", "email.results.send"],
     requiredSecrets: [emailSecret],
     operations: [
@@ -144,9 +172,10 @@ export const builtinAdapterMetadata = [
     ]
   }),
   adapter({
-    id: "adapter.whatsapp.fake",
+    id: "adapter.whatsapp",
     kind: "whatsapp",
-    displayName: "Mock WhatsApp Alerts",
+    displayName: "WhatsApp Cloud Alerts",
+    networkPolicy: whatsappNetworkPolicy,
     capabilities: ["whatsapp.alert.send"],
     requiredSecrets: [whatsappSecret],
     operations: [
@@ -168,9 +197,10 @@ export const builtinAdapterMetadata = [
     ]
   }),
   adapter({
-    id: "adapter.telegram.fake",
+    id: "adapter.telegram",
     kind: "telegram",
-    displayName: "Mock Telegram Alerts",
+    displayName: "Telegram Alerts",
+    networkPolicy: telegramNetworkPolicy,
     capabilities: ["telegram.alert.send"],
     requiredSecrets: [telegramSecret],
     operations: [
@@ -193,11 +223,21 @@ export const builtinAdapterMetadata = [
   })
 ] as const satisfies readonly AdapterMetadata[];
 
-export const fakeAdapterMetadata = builtinAdapterMetadata;
+export const mockAdapterMetadata = builtinAdapterMetadata.map((metadata) => ({
+  ...metadata,
+  id: `${metadata.id}.fake`,
+  displayName: `Mock ${metadata.displayName}`,
+  networkPolicy: noneNetworkPolicy,
+  live: false
+})) as readonly AdapterMetadata[];
+export const fakeAdapterMetadata = mockAdapterMetadata;
 
 export function createDefaultMockAdapters(): Map<string, MockAdapter> {
   return new Map<string, MockAdapter>(
-    builtinAdapterMetadata.map((metadata) => [metadata.id, createMockAdapter(metadata)])
+    [...builtinAdapterMetadata, ...mockAdapterMetadata].map((metadata) => [
+      metadata.id,
+      createMockAdapter(metadata)
+    ])
   );
 }
 
@@ -222,14 +262,14 @@ function adapter(input: {
   readonly operations: AdapterMetadata["operations"];
   readonly requiredSecrets: AdapterMetadata["requiredSecrets"];
   readonly fixtures: AdapterMetadata["fixtures"];
+  readonly networkPolicy: AdapterMetadata["networkPolicy"];
 }): AdapterMetadata {
   return {
     ...input,
     version: "1.0.0",
-    networkPolicy: mockNetworkPolicy,
     rateLimit: defaultRateLimit,
     retry: defaultRetry,
-    live: false
+    live: true
   };
 }
 

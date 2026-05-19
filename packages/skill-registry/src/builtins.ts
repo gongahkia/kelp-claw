@@ -43,8 +43,8 @@ export const builtinSkills: readonly SkillMetadata[] = [
       receipts: arraySchema
     },
     requiredSecrets: ["gmail.oauth"],
-    adapterDependencies: ["adapter.gmail.fake"],
-    adapterOperations: [adapterOperation("adapter.gmail.fake", "gmail.receipts.search")],
+    adapterDependencies: ["adapter.gmail"],
+    adapterOperations: [adapterOperation("adapter.gmail", "gmail.receipts.search")],
     runtimeTemplate,
     metaprompt:
       "Select this skill when the workflow needs Gmail receipt, order, invoice, or payment messages.",
@@ -73,8 +73,8 @@ export const builtinSkills: readonly SkillMetadata[] = [
       delivery: objectSchema
     },
     requiredSecrets: ["sheets.oauth"],
-    adapterDependencies: ["adapter.sheets.fake"],
-    adapterOperations: [adapterOperation("adapter.sheets.fake", "sheets.rows.append")],
+    adapterDependencies: ["adapter.sheets"],
+    adapterOperations: [adapterOperation("adapter.sheets", "sheets.rows.append")],
     runtimeTemplate,
     metaprompt:
       "Select this skill when structured rows should be appended to a spreadsheet or sheet range.",
@@ -103,8 +103,8 @@ export const builtinSkills: readonly SkillMetadata[] = [
       delivery: objectSchema
     },
     requiredSecrets: ["email.delivery"],
-    adapterDependencies: ["adapter.email.fake"],
-    adapterOperations: [adapterOperation("adapter.email.fake", "email.results.send")],
+    adapterDependencies: ["adapter.email"],
+    adapterOperations: [adapterOperation("adapter.email", "email.results.send")],
     runtimeTemplate,
     metaprompt:
       "Select this skill when a workflow needs primary result delivery, summaries, or completion notices by email.",
@@ -163,10 +163,10 @@ export const builtinSkills: readonly SkillMetadata[] = [
       delivery: objectSchema
     },
     requiredSecrets: ["whatsapp.apiKey", "telegram.botToken"],
-    adapterDependencies: ["adapter.whatsapp.fake", "adapter.telegram.fake"],
+    adapterDependencies: ["adapter.whatsapp", "adapter.telegram"],
     adapterOperations: [
-      adapterOperation("adapter.whatsapp.fake", "whatsapp.alert.send"),
-      adapterOperation("adapter.telegram.fake", "telegram.alert.send")
+      adapterOperation("adapter.whatsapp", "whatsapp.alert.send"),
+      adapterOperation("adapter.telegram", "telegram.alert.send")
     ],
     runtimeTemplate,
     metaprompt:
@@ -246,7 +246,7 @@ export const builtinSkills: readonly SkillMetadata[] = [
     id: "skill.adapter.dispatch",
     name: "Adapter Dispatch",
     version: "1.0.0",
-    description: "Routes a prepared payload to configured fake adapters in local test mode.",
+    description: "Routes a prepared payload to configured live delivery adapters.",
     deterministic: true,
     nodeKinds: ["delivery"],
     capabilities: ["adapter-dispatch"],
@@ -257,20 +257,19 @@ export const builtinSkills: readonly SkillMetadata[] = [
       delivery: objectSchema
     },
     requiredSecrets: [],
-    adapterDependencies: ["adapter.email.fake", "adapter.whatsapp.fake", "adapter.telegram.fake"],
+    adapterDependencies: ["adapter.email", "adapter.whatsapp", "adapter.telegram"],
     adapterOperations: [
-      adapterOperation("adapter.email.fake", "email.results.send"),
-      adapterOperation("adapter.whatsapp.fake", "whatsapp.alert.send"),
-      adapterOperation("adapter.telegram.fake", "telegram.alert.send")
+      adapterOperation("adapter.email", "email.results.send"),
+      adapterOperation("adapter.whatsapp", "whatsapp.alert.send"),
+      adapterOperation("adapter.telegram", "telegram.alert.send")
     ],
     runtimeTemplate,
-    metaprompt:
-      "Select this skill when a workflow needs fake email, WhatsApp, or Telegram dispatch.",
-    validationRules: ["only fake adapters are allowed in Phase 2"],
+    metaprompt: "Select this skill when a workflow needs email, WhatsApp, or Telegram dispatch.",
+    validationRules: ["delivery adapter ids must use canonical live ids"],
     examples: [
       {
         id: "example.adapter.dispatch",
-        description: "Send a fake Telegram message.",
+        description: "Send a Telegram message.",
         input: { payload: { text: "ready" } },
         output: { delivery: { status: "recorded" } }
       }

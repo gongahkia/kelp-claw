@@ -15,10 +15,14 @@ import {
   scheduledScrapingWorkflowFixture,
   stableWorkflowStringify,
   timeSensitiveAlertDeliveryWorkflowFixture,
+  redactJsonRecord,
+  redactedValue,
   validateWorkflowForExecution,
   validateWorkflowSpec,
   withConfig,
   workflowIdFromPrompt,
+  workflowAuditRecordSchema,
+  workflowObservabilityEventSchema,
   workflowJsonSchema,
   workflowSchemaVersion
 } from "../src/index.js";
@@ -99,6 +103,30 @@ describe("workflow spec validation", () => {
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.errors.map((error) => error.code)).toEqual(["WORKFLOW_NODE_ID_DUPLICATE"]);
+    }
+  });
+
+  it("rejects unpinned runtime images", () => {
+    const result = validateWorkflowSpec({
+      ...gmailReceiptsToSheetsWorkflowFixture,
+      nodes: gmailReceiptsToSheetsWorkflowFixture.nodes.map((node) =>
+        node.id === "manual-trigger"
+          ? {
+              ...node,
+              runtime: {
+                ...node.runtime,
+                image: "node:latest"
+              }
+            }
+          : node
+      )
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors.map((error) => error.code)).toEqual([
+        "WORKFLOW_RUNTIME_IMAGE_POLICY_INVALID"
+      ]);
     }
   });
 
@@ -229,6 +257,74 @@ describe("workflow migrations", () => {
         schemaVersion: "0.9.0"
       })
     ).toThrow("Unsupported workflow schema version");
+  });
+});
+
+describe("enterprise observability contracts", () => {
+  it("validates structured event and audit records with correlation context", () => {
+    const context = {
+      workflowId: "workflow.gmail-receipts-to-sheets",
+      revisionId: "approved.workflow.gmail-receipts-to-sheets.r1",
+      runId: "run.workflow.gmail-receipts-to-sheets.r1.1",
+      correlationId: "corr.phase7"
+    };
+
+    expect(
+      workflowObservabilityEventSchema.parse({
+        ...context,
+        id: "event.run.started",
+        timestamp: "2026-05-18T02:00:00.000Z",
+        severity: "info",
+        kind: "run.lifecycle",
+        message: "NanoClaw run started.",
+        metadata: {
+          redacted: true
+        }
+      })
+    ).toMatchObject({
+      workflowId: context.workflowId,
+      correlationId: context.correlationId
+    });
+
+    expect(
+      workflowAuditRecordSchema.parse({
+        ...context,
+        id: "audit.workflow.approved",
+        timestamp: "2026-05-18T02:00:00.000Z",
+        action: "workflow.approved",
+        actor: "owner@example.com",
+        summary: "Approved workflow revision.",
+        secretRefs: ["mock:gmail.oauth"]
+      })
+    ).toMatchObject({
+      action: "workflow.approved",
+      actor: "owner@example.com"
+    });
+  });
+
+  it("redacts provider tokens, raw secrets, authorization headers, and declared secret refs", () => {
+    expect(
+      redactJsonRecord(
+        {
+          authorization: "Bearer provider-token",
+          nested: {
+            apiKey: "sk-test",
+            safe: "visible",
+            ref: "mock:gmail.oauth",
+            raw: "raw:secret"
+          }
+        },
+        { secretRefs: ["mock:gmail.oauth"] }
+      )
+    ).toEqual({
+      authorization: redactedValue,
+      nested: {
+        apiKey: redactedValue,
+        safe: "visible",
+        ref: redactedValue,
+        raw: redactedValue
+      }
+    });
   });
 });
 

@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Background,
   Controls,
@@ -11,13 +11,29 @@ import type { Connection, Edge, EdgeChange, NodeChange } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import {
   CheckCircle2,
+  ChevronRight,
+  Clock3,
+  Database,
+  FileStack,
   GitBranch,
+  Grid2X2,
+  History,
+  KeyRound,
+  Layers3,
   ListChecks,
+  Mail,
+  MessageCircle,
+  Paperclip,
   Play,
   Plus,
   RefreshCw,
+  Search,
+  Send,
   ShieldCheck,
+  SlidersHorizontal,
+  Table2,
   Trash2,
+  Unplug,
   WandSparkles
 } from "lucide-react";
 import {
@@ -39,7 +55,8 @@ import type {
   WorkflowValidationIssue,
   WorkflowValidationResult
 } from "@kelpclaw/workflow-spec";
-import { openClawApi } from "./api-client.js";
+import { openClawApi, readOpenClawAdminToken, saveOpenClawAdminToken } from "./api-client.js";
+import type { IntegrationReadiness, SecretMetadata } from "./api-client.js";
 import {
   firstInputPort,
   firstOutputPort,
@@ -82,71 +99,137 @@ const adapterSkillPresets: readonly AdapterSkillPreset[] = [
     id: "skill.gmail.receipts.read",
     label: "Gmail receipts",
     nodeKinds: ["skill"],
-    adapterIds: ["adapter.gmail.fake"],
+    adapterIds: ["adapter.gmail"],
     adapterOperations: [
       {
-        adapterId: "adapter.gmail.fake",
+        adapterId: "adapter.gmail",
         operation: "gmail.receipts.search",
         operationVersion: "1.0.0"
       }
     ],
-    secretRefs: { "gmail.oauth": "mock:gmail.oauth" },
-    config: { query: "from:(receipts OR orders) newer_than:30d" }
+    secretRefs: { "gmail.oauth": "secret:google.oauth.default" },
+    config: {
+      query: "from:(receipts OR orders) newer_than:30d",
+      allowedHosts: ["oauth2.googleapis.com", "gmail.googleapis.com"]
+    }
   },
   {
     id: "skill.sheets.rows.append",
     label: "Sheets append",
     nodeKinds: ["delivery"],
-    adapterIds: ["adapter.sheets.fake"],
+    adapterIds: ["adapter.sheets"],
     adapterOperations: [
       {
-        adapterId: "adapter.sheets.fake",
+        adapterId: "adapter.sheets",
         operation: "sheets.rows.append",
         operationVersion: "1.0.0"
       }
     ],
-    secretRefs: { "sheets.oauth": "mock:sheets.oauth" },
-    config: { channel: "sheets", channels: ["sheets"], range: "Receipts!A:D" }
+    secretRefs: { "sheets.oauth": "secret:google.oauth.default" },
+    config: {
+      channel: "sheets",
+      channels: ["sheets"],
+      range: "Receipts!A:D",
+      allowedHosts: ["oauth2.googleapis.com", "sheets.googleapis.com"]
+    }
   },
   {
     id: "skill.email.results.deliver",
     label: "Email results",
     nodeKinds: ["delivery"],
-    adapterIds: ["adapter.email.fake"],
+    adapterIds: ["adapter.email"],
     adapterOperations: [
       {
-        adapterId: "adapter.email.fake",
+        adapterId: "adapter.email",
         operation: "email.results.send",
         operationVersion: "1.0.0"
       }
     ],
-    secretRefs: { "email.delivery": "mock:email.delivery" },
-    config: { channel: "email", channels: ["email"], to: "owner@example.com" }
+    secretRefs: { "email.delivery": "secret:email.smtp.default" },
+    config: {
+      channel: "email",
+      channels: ["email"],
+      to: "owner@example.com",
+      allowedHosts: ["smtp"]
+    }
   },
   {
     id: "skill.alert.push.dispatch",
     label: "Push alerts",
     nodeKinds: ["delivery"],
-    adapterIds: ["adapter.whatsapp.fake", "adapter.telegram.fake"],
+    adapterIds: ["adapter.whatsapp", "adapter.telegram"],
     adapterOperations: [
       {
-        adapterId: "adapter.whatsapp.fake",
+        adapterId: "adapter.whatsapp",
         operation: "whatsapp.alert.send",
         operationVersion: "1.0.0"
       },
       {
-        adapterId: "adapter.telegram.fake",
+        adapterId: "adapter.telegram",
         operation: "telegram.alert.send",
         operationVersion: "1.0.0"
       }
     ],
     secretRefs: {
-      "whatsapp.apiKey": "mock:whatsapp.apiKey",
-      "telegram.botToken": "mock:telegram.botToken"
+      "whatsapp.apiKey": "secret:whatsapp.cloud.default",
+      "telegram.botToken": "secret:telegram.bot.default"
     },
-    config: { channel: "email", channels: ["whatsapp", "telegram"], timeSensitive: true }
+    config: {
+      channel: "email",
+      channels: ["whatsapp", "telegram"],
+      timeSensitive: true,
+      allowedHosts: ["graph.facebook.com", "api.telegram.org"]
+    }
   }
 ];
+
+const componentCategories = [
+  { label: "Input & Output", icon: Unplug },
+  { label: "Data Sources", icon: Database },
+  { label: "Models & Agents", icon: Layers3 },
+  { label: "LLM Operations", icon: WandSparkles },
+  { label: "Files & Knowledge", icon: FileStack },
+  { label: "Processing", icon: SlidersHorizontal },
+  { label: "Flow Control", icon: GitBranch }
+] as const;
+
+const railItems = [
+  { label: "Search", icon: Search },
+  { label: "Components", icon: Grid2X2 },
+  { label: "Attachments", icon: Paperclip },
+  { label: "History", icon: History }
+] as const;
+
+const integrationSetups = [
+  {
+    id: "google",
+    label: "Google",
+    icon: Table2,
+    secretName: "google.oauth.default",
+    placeholder: '{"refreshToken":"...","clientId":"...","clientSecret":"..."}'
+  },
+  {
+    id: "smtp",
+    label: "SMTP",
+    icon: Mail,
+    secretName: "email.smtp.default",
+    placeholder: '{"host":"smtp.example.com","port":587,"username":"...","password":"..."}'
+  },
+  {
+    id: "whatsapp",
+    label: "WhatsApp",
+    icon: MessageCircle,
+    secretName: "whatsapp.cloud.default",
+    placeholder: '{"accessToken":"...","phoneNumberId":"...","apiVersion":"v20.0"}'
+  },
+  {
+    id: "telegram",
+    label: "Telegram",
+    icon: Send,
+    secretName: "telegram.bot.default",
+    placeholder: '{"botToken":"...","chatId":"..."}'
+  }
+] as const;
 
 export function App() {
   const [workflow, setWorkflow] = useState<WorkflowSpec>(gmailReceiptsToSheetsWorkflowFixture);
@@ -165,6 +248,13 @@ export function App() {
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [apiError, setApiError] = useState<string | null>(null);
   const [promotionNotice, setPromotionNotice] = useState<string | null>(null);
+  const [adminToken, setAdminToken] = useState(readOpenClawAdminToken);
+  const [integrationReadiness, setIntegrationReadiness] = useState<readonly IntegrationReadiness[]>(
+    []
+  );
+  const [secretMetadata, setSecretMetadata] = useState<readonly SecretMetadata[]>([]);
+  const [googleConnected, setGoogleConnected] = useState<boolean | null>(null);
+  const [secretDrafts, setSecretDrafts] = useState<Readonly<Record<string, string>>>({});
 
   const validationIssues = validation.ok ? [] : validation.errors;
   const [nodes, setNodes, onNodesChangeBase] = useNodesState<WorkflowFlowNode>(
@@ -184,6 +274,27 @@ export function App() {
   );
   const canApprove = validation.ok;
   const canRun = approvedRevision !== null;
+
+  const refreshIntegrations = useCallback(async () => {
+    try {
+      const [secrets, google] = await Promise.all([
+        openClawApi.listSecrets(),
+        openClawApi.googleStatus()
+      ]);
+      setSecretMetadata(secrets.secrets);
+      setIntegrationReadiness(secrets.integrations);
+      setGoogleConnected(google.connected);
+    } catch (error) {
+      setApiError(error instanceof Error ? error.message : "Integration status request failed.");
+    }
+  }, []);
+
+  useEffect(() => {
+    const timeout = window.setTimeout(() => {
+      void refreshIntegrations();
+    }, 0);
+    return () => window.clearTimeout(timeout);
+  }, [adminToken, refreshIntegrations]);
 
   const loadWorkflow = useCallback(
     (
@@ -220,6 +331,56 @@ export function App() {
     } finally {
       setBusyAction(null);
     }
+  }
+
+  function updateAdminToken(value: string) {
+    setAdminToken(value);
+    saveOpenClawAdminToken(value);
+  }
+
+  function updateSecretDraft(secretName: string, value: string) {
+    setSecretDrafts((previous) => ({
+      ...previous,
+      [secretName]: value
+    }));
+  }
+
+  function saveSecret(secretName: string) {
+    const value = secretDrafts[secretName]?.trim() ?? "";
+    if (!value) {
+      setApiError(`Secret '${secretName}' requires a value.`);
+      return;
+    }
+
+    void executeApiAction(`secret-${secretName}`, async () => {
+      await openClawApi.upsertSecret(secretName, value);
+      setSecretDrafts((previous) => ({
+        ...previous,
+        [secretName]: ""
+      }));
+      await refreshIntegrations();
+    });
+  }
+
+  function deleteSecret(secretName: string) {
+    void executeApiAction(`delete-secret-${secretName}`, async () => {
+      await openClawApi.deleteSecret(secretName);
+      await refreshIntegrations();
+    });
+  }
+
+  function connectGoogle() {
+    void executeApiAction("google-connect", async () => {
+      const response = await openClawApi.googleConnect();
+      globalThis.location.assign(response.url);
+    });
+  }
+
+  function revokeGoogle() {
+    void executeApiAction("google-revoke", async () => {
+      await openClawApi.googleRevoke();
+      await refreshIntegrations();
+    });
   }
 
   function markDirty(nodeId: string) {
@@ -503,40 +664,57 @@ export function App() {
 
   return (
     <main className="app-shell">
-      <header className="topbar">
-        <div>
-          <p className="eyebrow">KelpClaw</p>
-          <h1>OpenClaw</h1>
-        </div>
-        <div className="topbar-actions" aria-label="Workflow actions">
-          <button title="Validate workflow" onClick={validateDraft} disabled={busyAction !== null}>
-            <ShieldCheck size={18} />
-            Validate
-          </button>
-          <button
-            title="Approve workflow"
-            onClick={approveWorkflow}
-            disabled={!canApprove || busyAction !== null}
-          >
-            <CheckCircle2 size={18} />
-            Approve
-          </button>
-          <button
-            title="Run workflow"
-            onClick={runWorkflow}
-            disabled={!canRun || busyAction !== null}
-          >
-            <Play size={18} />
-            Run
-          </button>
-          <button className="icon-button" title="Reset workflow" onClick={resetWorkflow}>
-            <RefreshCw size={18} />
-          </button>
-        </div>
-      </header>
-
       <section className="workspace">
+        <aside className="nav-rail" aria-label="Workspace navigation">
+          {railItems.map((item, index) => {
+            const Icon = item.icon;
+            return (
+              <button
+                key={item.label}
+                className={index === 1 ? "rail-button rail-button-active" : "rail-button"}
+                type="button"
+                title={item.label}
+              >
+                <Icon size={19} />
+              </button>
+            );
+          })}
+        </aside>
+
         <aside className="panel planner-panel" aria-label="Workflow planner">
+          <div className="sidebar-search">
+            <Search size={18} />
+            <input aria-label="Search components" placeholder="Search" />
+            <kbd>/</kbd>
+          </div>
+
+          <section className="component-browser" aria-label="Component categories">
+            <div className="component-heading">
+              <h2>Components</h2>
+              <SlidersHorizontal size={16} />
+            </div>
+            <div className="component-list">
+              {componentCategories.map((category, index) => {
+                const Icon = category.icon;
+                return (
+                  <button
+                    key={category.label}
+                    className={index === 0 ? "component-row component-row-active" : "component-row"}
+                    type="button"
+                  >
+                    <Icon size={18} />
+                    <span>{category.label}</span>
+                    <ChevronRight size={16} />
+                  </button>
+                );
+              })}
+            </div>
+            <button className="discover-button" type="button">
+              <Grid2X2 size={18} />
+              Discover more components
+            </button>
+          </section>
+
           <form
             className="prompt-form"
             onSubmit={(event) => {
@@ -605,10 +783,61 @@ export function App() {
             ) : null}
           </section>
 
+          <IntegrationPanel
+            adminToken={adminToken}
+            integrations={integrationReadiness}
+            secrets={secretMetadata}
+            googleConnected={googleConnected}
+            secretDrafts={secretDrafts}
+            busyAction={busyAction}
+            onAdminTokenChange={updateAdminToken}
+            onRefresh={refreshIntegrations}
+            onSecretDraftChange={updateSecretDraft}
+            onSaveSecret={saveSecret}
+            onDeleteSecret={deleteSecret}
+            onConnectGoogle={connectGoogle}
+            onRevokeGoogle={revokeGoogle}
+          />
+
           {apiError ? <p className="error-text">{apiError}</p> : null}
         </aside>
 
         <section className="canvas-panel" aria-label="Workflow graph">
+          <header className="topbar">
+            <div>
+              <p className="eyebrow">KelpClaw</p>
+              <h1>OpenClaw</h1>
+            </div>
+            <div className="topbar-actions" aria-label="Workflow actions">
+              <button
+                title="Validate workflow"
+                onClick={validateDraft}
+                disabled={busyAction !== null}
+              >
+                <ShieldCheck size={18} />
+                Validate
+              </button>
+              <button
+                title="Approve workflow"
+                onClick={approveWorkflow}
+                disabled={!canApprove || busyAction !== null}
+              >
+                <CheckCircle2 size={18} />
+                Approve
+              </button>
+              <button
+                title="Run workflow"
+                onClick={runWorkflow}
+                disabled={!canRun || busyAction !== null}
+              >
+                <Play size={18} />
+                Run
+              </button>
+              <button className="icon-button" title="Reset workflow" onClick={resetWorkflow}>
+                <RefreshCw size={18} />
+              </button>
+            </div>
+          </header>
           <div className="canvas-toolbar" aria-label="Canvas controls">
             <div className="node-kind-actions">
               {nodeKinds.map((kind) => (
@@ -662,10 +891,16 @@ export function App() {
             minZoom={0.5}
             maxZoom={1.35}
           >
-            <Background color="#cbd5e1" gap={18} />
+            <Background color="#272a32" gap={18} size={1.15} />
             <MiniMap pannable zoomable />
             <Controls showInteractive={false} />
           </ReactFlow>
+          <div className="canvas-footer" aria-label="Canvas status">
+            <span className="canvas-wave">~</span>
+            <span>63%</span>
+            <Clock3 size={18} />
+            <span>{workflow.nodes.length} nodes</span>
+          </div>
         </section>
 
         <aside className="panel inspector-panel" aria-label="Workflow inspector">
@@ -962,6 +1197,131 @@ function Inspector(props: {
   );
 }
 
+function IntegrationPanel(props: {
+  readonly adminToken: string;
+  readonly integrations: readonly IntegrationReadiness[];
+  readonly secrets: readonly SecretMetadata[];
+  readonly googleConnected: boolean | null;
+  readonly secretDrafts: Readonly<Record<string, string>>;
+  readonly busyAction: string | null;
+  readonly onAdminTokenChange: (value: string) => void;
+  readonly onRefresh: () => Promise<void>;
+  readonly onSecretDraftChange: (secretName: string, value: string) => void;
+  readonly onSaveSecret: (secretName: string) => void;
+  readonly onDeleteSecret: (secretName: string) => void;
+  readonly onConnectGoogle: () => void;
+  readonly onRevokeGoogle: () => void;
+}) {
+  const secretMap = new Map(props.secrets.map((secret) => [secret.name, secret]));
+
+  return (
+    <section className="integration-panel" aria-label="Integration setup">
+      <div className="panel-heading">
+        <KeyRound size={18} />
+        <h2>Integrations</h2>
+        <button
+          className="icon-button"
+          type="button"
+          title="Refresh integrations"
+          onClick={() => {
+            void props.onRefresh();
+          }}
+        >
+          <RefreshCw size={16} />
+        </button>
+      </div>
+      <label>
+        Admin token
+        <input
+          type="password"
+          value={props.adminToken}
+          onChange={(event) => props.onAdminTokenChange(event.target.value)}
+          autoComplete="off"
+        />
+      </label>
+      <div className="integration-list">
+        {integrationSetups.map((setup) => {
+          const Icon = setup.icon;
+          const status = integrationStatus(setup.id, props.integrations, props.googleConnected);
+          const secret = secretMap.get(setup.secretName);
+          const draft = props.secretDrafts[setup.secretName] ?? "";
+          return (
+            <section className="integration-row" key={setup.id}>
+              <div className="integration-row-header">
+                <span>
+                  <Icon size={16} />
+                  {setup.label}
+                </span>
+                <strong className={`status-pill status-${status.tone}`}>{status.label}</strong>
+              </div>
+              <div className="secret-meta">
+                <span>{setup.secretName}</span>
+                <span>{secret ? "stored" : "missing"}</span>
+              </div>
+              <textarea
+                aria-label={`${setup.label} secret`}
+                value={draft}
+                placeholder={setup.placeholder}
+                rows={2}
+                onChange={(event) =>
+                  props.onSecretDraftChange(setup.secretName, event.target.value)
+                }
+              />
+              <div className="integration-actions">
+                {setup.id === "google" ? (
+                  <>
+                    <button
+                      type="button"
+                      onClick={props.onConnectGoogle}
+                      disabled={props.busyAction !== null}
+                    >
+                      <Table2 size={16} />
+                      Connect
+                    </button>
+                    <button
+                      type="button"
+                      onClick={props.onRevokeGoogle}
+                      disabled={props.busyAction !== null || !secret}
+                    >
+                      Revoke
+                    </button>
+                  </>
+                ) : null}
+                <button
+                  type="button"
+                  onClick={() => props.onSaveSecret(setup.secretName)}
+                  disabled={props.busyAction !== null || draft.trim().length === 0}
+                >
+                  <CheckCircle2 size={16} />
+                  Save
+                </button>
+                <button
+                  type="button"
+                  onClick={() => props.onDeleteSecret(setup.secretName)}
+                  disabled={props.busyAction !== null || !secret}
+                >
+                  <Trash2 size={16} />
+                  Delete
+                </button>
+              </div>
+            </section>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+function integrationStatus(
+  id: string,
+  integrations: readonly IntegrationReadiness[],
+  googleConnected: boolean | null
+): { readonly label: string; readonly tone: string } {
+  const readiness = integrations.find((candidate) => candidate.id === id);
+  const ready = id === "google" ? (googleConnected ?? readiness?.ready ?? false) : readiness?.ready;
+  return ready ? { label: "ready", tone: "valid" } : { label: "blocked", tone: "blocked" };
+}
+
 function ApprovalPanel(props: {
   readonly diff: WorkflowSpecDiff | null;
   readonly approvedRevision: WorkflowApprovedRevision | null;
@@ -1157,6 +1517,10 @@ function withDeliveryAdapters(node: WorkflowNode): WorkflowNode {
     secretRefs: {
       ...(node.secretRefs ?? {}),
       ...declarations.secretRefs
+    },
+    config: {
+      ...node.config,
+      allowedHosts: mergeAllowedHosts(node.config.allowedHosts, declarations.allowedHosts)
     }
   };
 }
@@ -1165,10 +1529,12 @@ function adapterDeclarationsForChannels(channels: ReadonlySet<string>): {
   readonly adapterIds: readonly string[];
   readonly adapterOperations: readonly WorkflowAdapterOperationRef[];
   readonly secretRefs: Readonly<Record<string, string>>;
+  readonly allowedHosts: readonly string[];
 } {
   const adapterIds: string[] = [];
   const adapterOperations: WorkflowAdapterOperationRef[] = [];
   const secretRefs: Record<string, string> = {};
+  const allowedHosts = new Set<string>();
 
   for (const channel of [...channels].sort()) {
     const declaration = adapterDeclarationForChannel(channel);
@@ -1178,12 +1544,16 @@ function adapterDeclarationsForChannels(channels: ReadonlySet<string>): {
     adapterIds.push(declaration.adapterId);
     adapterOperations.push(declaration.operation);
     Object.assign(secretRefs, declaration.secretRefs);
+    for (const host of declaration.allowedHosts) {
+      allowedHosts.add(host);
+    }
   }
 
   return {
     adapterIds,
     adapterOperations,
-    secretRefs
+    secretRefs,
+    allowedHosts: [...allowedHosts].sort()
   };
 }
 
@@ -1192,52 +1562,76 @@ function adapterDeclarationForChannel(channel: string):
       readonly adapterId: string;
       readonly operation: WorkflowAdapterOperationRef;
       readonly secretRefs: Readonly<Record<string, string>>;
+      readonly allowedHosts: readonly string[];
     }
   | undefined {
   switch (channel) {
     case "email":
       return {
-        adapterId: "adapter.email.fake",
+        adapterId: "adapter.email",
         operation: {
-          adapterId: "adapter.email.fake",
+          adapterId: "adapter.email",
           operation: "email.results.send",
           operationVersion: "1.0.0"
         },
-        secretRefs: { "email.delivery": "mock:email.delivery" }
+        secretRefs: { "email.delivery": "secret:email.smtp.default" },
+        allowedHosts: ["smtp"]
       };
     case "sheets":
       return {
-        adapterId: "adapter.sheets.fake",
+        adapterId: "adapter.sheets",
         operation: {
-          adapterId: "adapter.sheets.fake",
+          adapterId: "adapter.sheets",
           operation: "sheets.rows.append",
           operationVersion: "1.0.0"
         },
-        secretRefs: { "sheets.oauth": "mock:sheets.oauth" }
+        secretRefs: { "sheets.oauth": "secret:google.oauth.default" },
+        allowedHosts: ["oauth2.googleapis.com", "sheets.googleapis.com"]
       };
     case "whatsapp":
       return {
-        adapterId: "adapter.whatsapp.fake",
+        adapterId: "adapter.whatsapp",
         operation: {
-          adapterId: "adapter.whatsapp.fake",
+          adapterId: "adapter.whatsapp",
           operation: "whatsapp.alert.send",
           operationVersion: "1.0.0"
         },
-        secretRefs: { "whatsapp.apiKey": "mock:whatsapp.apiKey" }
+        secretRefs: { "whatsapp.apiKey": "secret:whatsapp.cloud.default" },
+        allowedHosts: ["graph.facebook.com"]
       };
     case "telegram":
       return {
-        adapterId: "adapter.telegram.fake",
+        adapterId: "adapter.telegram",
         operation: {
-          adapterId: "adapter.telegram.fake",
+          adapterId: "adapter.telegram",
           operation: "telegram.alert.send",
           operationVersion: "1.0.0"
         },
-        secretRefs: { "telegram.botToken": "mock:telegram.botToken" }
+        secretRefs: { "telegram.botToken": "secret:telegram.bot.default" },
+        allowedHosts: ["api.telegram.org"]
       };
     default:
       return undefined;
   }
+}
+
+function mergeAllowedHosts(
+  existing: JsonRecord[string] | undefined,
+  additional: readonly string[]
+): string[] {
+  const hosts = new Set<string>();
+  if (Array.isArray(existing)) {
+    for (const host of existing) {
+      if (typeof host === "string") {
+        hosts.add(host);
+      }
+    }
+  }
+  for (const host of additional) {
+    hosts.add(host);
+  }
+
+  return [...hosts].sort();
 }
 
 function deliveryChannels(node: WorkflowNode): ReadonlySet<string> {

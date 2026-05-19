@@ -1,8 +1,15 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { FastifyInstance } from "fastify";
+import { createDefaultMockAdapters } from "@kelpclaw/adapters";
+import { AdapterBackedNodeRunner, MockNodeRunner } from "@kelpclaw/nanoclaw";
 import { clearPromotedSkillsForTests } from "@kelpclaw/skill-registry";
 import { gmailReceiptsToSheetsWorkflowFixture } from "@kelpclaw/workflow-spec";
-import { buildApiApp, createDeterministicPlannerBackend } from "../src/index.js";
+import {
+  buildApiApp,
+  createDeterministicPlannerBackend,
+  createPlannerBackendFromEnv,
+  InMemorySecretStore
+} from "../src/index.js";
 
 let app: FastifyInstance | undefined;
 
@@ -10,11 +17,22 @@ afterEach(async () => {
   await app?.close();
   app = undefined;
   clearPromotedSkillsForTests();
+  vi.unstubAllGlobals();
 });
 
 function buildTestApiApp(): FastifyInstance {
+  const secretStore = new InMemorySecretStore();
+  secretStore.putSecret("google.oauth.default", "test-google-token");
+  secretStore.putSecret("email.smtp.default", "test-email-secret");
+  secretStore.putSecret("whatsapp.cloud.default", "test-whatsapp-token");
+  secretStore.putSecret("telegram.bot.default", "test-telegram-token");
   return buildApiApp({
-    planner: createDeterministicPlannerBackend()
+    planner: createDeterministicPlannerBackend(),
+    secretStore,
+    runner: new AdapterBackedNodeRunner({
+      adapters: createDefaultMockAdapters(),
+      fallbackRunner: new MockNodeRunner()
+    })
   });
 }
 
@@ -40,6 +58,158 @@ describe("kelpclaw api contracts", () => {
     expect(response.statusCode).toBe(200);
     expect(response.json().workflow.prompt).toBe("Launch Review");
     expect(response.json().workflow.schemaVersion).toBe("1.0.0");
+  });
+
+  it("requires admin bearer auth when configured", async () => {
+    app = buildApiApp({
+      adminToken: "test-admin-token",
+      planner: createDeterministicPlannerBackend()
+    });
+
+    const unauthorized = await app.inject({
+      method: "POST",
+      url: "/api/workflows/plan",
+      payload: { prompt: "extract transaction details from Gmail receipts into Sheets" }
+    });
+    const authorized = await app.inject({
+      method: "POST",
+      url: "/api/workflows/plan",
+      headers: { authorization: "Bearer test-admin-token" },
+      payload: { prompt: "extract transaction details from Gmail receipts into Sheets" }
+    });
+
+    expect(unauthorized.statusCode).toBe(401);
+    expect(authorized.statusCode).toBe(200);
+  });
+
+  it("stores secret metadata without returning raw values", async () => {
+    const secretStore = new InMemorySecretStore();
+    app = buildApiApp({
+      adminToken: "test-admin-token",
+      planner: createDeterministicPlannerBackend(),
+      secretStore
+    });
+
+    const stored = await app.inject({
+      method: "PUT",
+      url: "/api/secrets",
+      headers: { authorization: "Bearer test-admin-token" },
+      payload: { name: "email.smtp.default", value: "smtp-secret" }
+    });
+    const listed = await app.inject({
+      method: "GET",
+      url: "/api/secrets",
+      headers: { authorization: "Bearer test-admin-token" }
+    });
+
+    expect(stored.statusCode).toBe(200);
+    expect(stored.json().secret).toMatchObject({ name: "email.smtp.default" });
+    expect(listed.json().secrets).toEqual([
+      expect.objectContaining({ name: "email.smtp.default" })
+    ]);
+    expect(JSON.stringify(listed.json())).not.toContain("smtp-secret");
+  });
+
+  it("creates and consumes a Google OAuth callback state", async () => {
+    const previous = {
+      publicBaseUrl: process.env.KELPCLAW_PUBLIC_BASE_URL,
+      clientId: process.env.GOOGLE_CLIENT_ID,
+      clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+      tokenUrl: process.env.GOOGLE_TOKEN_URL
+    };
+    process.env.KELPCLAW_PUBLIC_BASE_URL = "http://127.0.0.1:8787";
+    process.env.GOOGLE_CLIENT_ID = "google-client";
+    process.env.GOOGLE_CLIENT_SECRET = "google-secret";
+    process.env.GOOGLE_TOKEN_URL = "https://oauth.test/token";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ refresh_token: "refresh-token" }), {
+            status: 200,
+            headers: { "content-type": "application/json" }
+          })
+      )
+    );
+    const secretStore = new InMemorySecretStore();
+    app = buildApiApp({
+      adminToken: "test-admin-token",
+      planner: createDeterministicPlannerBackend(),
+      secretStore
+    });
+
+    try {
+      const connect = await app.inject({
+        method: "GET",
+        url: "/api/integrations/google/connect",
+        headers: { authorization: "Bearer test-admin-token" }
+      });
+      const callback = await app.inject({
+        method: "GET",
+        url: `/api/integrations/google/callback?code=auth-code&state=${connect.json().state}`
+      });
+
+      expect(connect.statusCode).toBe(200);
+      expect(connect.json().url).toContain("accounts.google.com");
+      expect(callback.statusCode).toBe(200);
+      await expect(secretStore.getSecretValue("google.oauth.default")).resolves.toContain(
+        "refresh-token"
+      );
+    } finally {
+      restoreEnv("KELPCLAW_PUBLIC_BASE_URL", previous.publicBaseUrl);
+      restoreEnv("GOOGLE_CLIENT_ID", previous.clientId);
+      restoreEnv("GOOGLE_CLIENT_SECRET", previous.clientSecret);
+      restoreEnv("GOOGLE_TOKEN_URL", previous.tokenUrl);
+    }
+  });
+
+  it("configures deterministic planner mode from environment", async () => {
+    const previousMode = process.env.KELPCLAW_PLANNER_MODE;
+    process.env.KELPCLAW_PLANNER_MODE = "deterministic";
+    app = buildApiApp();
+
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/workflows/plan",
+        payload: {
+          prompt: "scrape a custom public status page and summarize incidents"
+        }
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(
+        response.json().workflow.nodes.some((node: { kind: string }) => node.kind === "codegen")
+      ).toBe(true);
+    } finally {
+      if (previousMode === undefined) {
+        delete process.env.KELPCLAW_PLANNER_MODE;
+      } else {
+        process.env.KELPCLAW_PLANNER_MODE = previousMode;
+      }
+    }
+  });
+
+  it("rejects unsupported planner provider configuration", () => {
+    const previousMode = process.env.KELPCLAW_PLANNER_MODE;
+    const previousProvider = process.env.KELPCLAW_PLANNER_PROVIDER;
+    process.env.KELPCLAW_PLANNER_MODE = "live";
+    process.env.KELPCLAW_PLANNER_PROVIDER = "unsupported";
+
+    try {
+      expect(() => createPlannerBackendFromEnv()).toThrow("KELPCLAW_PLANNER_PROVIDER");
+    } finally {
+      if (previousMode === undefined) {
+        delete process.env.KELPCLAW_PLANNER_MODE;
+      } else {
+        process.env.KELPCLAW_PLANNER_MODE = previousMode;
+      }
+      if (previousProvider === undefined) {
+        delete process.env.KELPCLAW_PLANNER_PROVIDER;
+      } else {
+        process.env.KELPCLAW_PLANNER_PROVIDER = previousProvider;
+      }
+    }
   });
 
   it("plans and validates draft workflow revisions through the Phase 3 routes", async () => {
@@ -280,6 +450,9 @@ describe("kelpclaw api contracts", () => {
     const run = await app.inject({
       method: "POST",
       url: `/api/workflows/${workflow.id}/runs`,
+      headers: {
+        "x-correlation-id": "corr.api-test"
+      },
       payload: {
         approvedRevisionId: approved.json().approvedRevisionId
       }
@@ -289,6 +462,9 @@ describe("kelpclaw api contracts", () => {
     expect(run.json().run.events.map((event: { message: string }) => event.message)).toContain(
       "NanoClaw run finished."
     );
+    expect(run.json().run.events[0].workflowId).toBe(workflow.id);
+    expect(run.json().run.events[0].revisionId).toBe(approved.json().approvedRevisionId);
+    expect(run.json().run.events[0].correlationId).toBe("corr.api-test");
 
     const fetchedRun = await app.inject({
       method: "GET",
@@ -296,6 +472,29 @@ describe("kelpclaw api contracts", () => {
     });
     expect(fetchedRun.statusCode).toBe(200);
     expect(fetchedRun.json().run.id).toBe(run.json().run.id);
+
+    const runEvents = await app.inject({
+      method: "GET",
+      url: `/api/workflows/${workflow.id}/runs/${run.json().run.id}/events`
+    });
+    expect(runEvents.statusCode).toBe(200);
+    expect(runEvents.json().events.at(-1).kind).toBe("run.lifecycle");
+
+    const audit = await app.inject({
+      method: "GET",
+      url: `/api/workflows/${workflow.id}/audit`
+    });
+    expect(audit.statusCode).toBe(200);
+    expect(audit.json().audit.map((record: { action: string }) => record.action)).toContain(
+      "run.completed"
+    );
+
+    const fetchedRevision = await app.inject({
+      method: "GET",
+      url: `/api/workflows/${workflow.id}/revisions/${approved.json().approvedRevisionId}`
+    });
+    expect(fetchedRevision.statusCode).toBe(200);
+    expect(fetchedRevision.json().approvedRevision.id).toBe(approved.json().approvedRevisionId);
   });
 
   it("validates invalid workflows with stable errors", async () => {
@@ -392,3 +591,11 @@ describe("kelpclaw api contracts", () => {
     expect(revision.json().workflow.name).toBe("Updated Receipt Sync");
   });
 });
+
+function restoreEnv(name: string, value: string | undefined): void {
+  if (value === undefined) {
+    delete process.env[name];
+  } else {
+    process.env[name] = value;
+  }
+}
