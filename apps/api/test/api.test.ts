@@ -1,14 +1,22 @@
 import { afterEach, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
+import { clearPromotedSkillsForTests } from "@kelpclaw/skill-registry";
 import { gmailReceiptsToSheetsWorkflowFixture } from "@kelpclaw/workflow-spec";
-import { buildApiApp } from "../src/index.js";
+import { buildApiApp, createDeterministicPlannerBackend } from "../src/index.js";
 
 let app: FastifyInstance | undefined;
 
 afterEach(async () => {
   await app?.close();
   app = undefined;
+  clearPromotedSkillsForTests();
 });
+
+function buildTestApiApp(): FastifyInstance {
+  return buildApiApp({
+    planner: createDeterministicPlannerBackend()
+  });
+}
 
 describe("kelpclaw api contracts", () => {
   it("reports health", async () => {
@@ -21,7 +29,7 @@ describe("kelpclaw api contracts", () => {
   });
 
   it("returns a mock planner workflow", async () => {
-    app = buildApiApp();
+    app = buildTestApiApp();
 
     const response = await app.inject({
       method: "POST",
@@ -35,7 +43,7 @@ describe("kelpclaw api contracts", () => {
   });
 
   it("plans and validates draft workflow revisions through the Phase 3 routes", async () => {
-    app = buildApiApp();
+    app = buildTestApiApp();
 
     const planned = await app.inject({
       method: "POST",
@@ -78,8 +86,129 @@ describe("kelpclaw api contracts", () => {
     expect(validatedAgain.json().draftRevision.id).toBe(validated.json().draftRevision.id);
   });
 
+  it("plans codegen fallback nodes with persisted artifact metadata", async () => {
+    app = buildTestApiApp();
+
+    const planned = await app.inject({
+      method: "POST",
+      url: "/api/workflows/plan",
+      payload: {
+        prompt: "scrape a custom public status page and summarize incidents"
+      }
+    });
+
+    expect(planned.statusCode).toBe(200);
+    const codegenNode = planned
+      .json()
+      .workflow.nodes.find((node: { kind: string }) => node.kind === "codegen");
+    expect(codegenNode.codegen.review.status).toBe("draft");
+    expect(codegenNode.codegen.plannerRationale).toContain("codegen node");
+    expect(
+      codegenNode.codegen.artifacts.map((artifact: { path: string }) => artifact.path)
+    ).toEqual(["generated/package-manifest.json", "generated/scrape-status-page.ts"]);
+  });
+
+  it("blocks approval until generated code is reviewed", async () => {
+    app = buildTestApiApp();
+
+    const planned = await app.inject({
+      method: "POST",
+      url: "/api/workflows/plan",
+      payload: {
+        prompt: "scrape a custom public status page and summarize incidents"
+      }
+    });
+    const workflow = planned.json().workflow;
+    const blockedApproval = await app.inject({
+      method: "POST",
+      url: `/api/workflows/${workflow.id}/approve`,
+      payload: {
+        workflow,
+        approvedBy: "owner@example.com"
+      }
+    });
+
+    expect(blockedApproval.statusCode).toBe(409);
+    expect(blockedApproval.json().issues[0].code).toBe("WORKFLOW_CODEGEN_REVIEW_REQUIRED");
+  });
+
+  it("reviews generated code before approval", async () => {
+    app = buildTestApiApp();
+
+    const planned = await app.inject({
+      method: "POST",
+      url: "/api/workflows/plan",
+      payload: {
+        prompt: "scrape a custom public status page and summarize incidents"
+      }
+    });
+    const workflow = planned.json().workflow;
+    const reviewed = await app.inject({
+      method: "POST",
+      url: `/api/workflows/${workflow.id}/codegen/scrape-status-page/review`,
+      payload: {
+        status: "approved",
+        reviewedBy: "owner@example.com",
+        notes: "fixture reviewed"
+      }
+    });
+
+    expect(reviewed.statusCode).toBe(200);
+    expect(reviewed.json().node.codegen.review.status).toBe("approved");
+
+    const approved = await app.inject({
+      method: "POST",
+      url: `/api/workflows/${workflow.id}/approve`,
+      payload: {
+        workflow: reviewed.json().workflow,
+        approvedBy: "owner@example.com"
+      }
+    });
+    expect(approved.statusCode).toBe(200);
+  });
+
+  it("promotes reviewed generated code into a reusable skill for future planning", async () => {
+    app = buildTestApiApp();
+
+    const planned = await app.inject({
+      method: "POST",
+      url: "/api/workflows/plan",
+      payload: {
+        prompt: "scrape a custom public status page and summarize incidents"
+      }
+    });
+    const workflow = planned.json().workflow;
+    await app.inject({
+      method: "POST",
+      url: `/api/workflows/${workflow.id}/codegen/scrape-status-page/review`,
+      payload: {
+        status: "approved",
+        reviewedBy: "owner@example.com"
+      }
+    });
+    const promoted = await app.inject({
+      method: "POST",
+      url: `/api/workflows/${workflow.id}/codegen/scrape-status-page/promote`
+    });
+    expect(promoted.statusCode).toBe(200);
+    expect(promoted.json().skill.id).toContain("skill.promoted.");
+
+    const replanned = await app.inject({
+      method: "POST",
+      url: "/api/workflows/plan",
+      payload: {
+        prompt: "scrape a custom public status page and summarize incidents"
+      }
+    });
+    const reusedNode = replanned
+      .json()
+      .workflow.nodes.find((node: { id: string }) => node.id === "scrape-status-page");
+    expect(reusedNode.kind).toBe("skill");
+    expect(reusedNode.skillId).toBe(promoted.json().skill.id);
+  });
+
   it("reprompts, approves, runs, and fetches Phase 3 workflows", async () => {
-    app = buildApiApp();
+    app = buildTestApiApp();
 
     const planned = await app.inject({
       method: "POST",
@@ -170,7 +299,7 @@ describe("kelpclaw api contracts", () => {
   });
 
   it("validates invalid workflows with stable errors", async () => {
-    app = buildApiApp();
+    app = buildTestApiApp();
 
     const response = await app.inject({
       method: "POST",
@@ -184,7 +313,7 @@ describe("kelpclaw api contracts", () => {
   });
 
   it("creates, approves, executes, and fetches workflows", async () => {
-    app = buildApiApp();
+    app = buildTestApiApp();
 
     const created = await app.inject({
       method: "POST",
@@ -233,7 +362,7 @@ describe("kelpclaw api contracts", () => {
   });
 
   it("creates a new draft revision after approval", async () => {
-    app = buildApiApp();
+    app = buildTestApiApp();
 
     await app.inject({
       method: "POST",

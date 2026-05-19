@@ -1,4 +1,6 @@
 import Fastify from "fastify";
+import { LocalCodegenArtifactStore, createGeneratedArtifact } from "@kelpclaw/codegen";
+import { registerPromotedSkill } from "@kelpclaw/skill-registry";
 import {
   DockerNodeRunner,
   MockNodeRunner,
@@ -11,9 +13,12 @@ import {
   validateWorkflowSpec
 } from "@kelpclaw/workflow-spec";
 import type { FastifyInstance } from "fastify";
+import type { CodegenArtifactStore } from "@kelpclaw/codegen";
+import type { SkillMetadata } from "@kelpclaw/skill-registry";
 import type {
   WorkflowApproveRequest,
   WorkflowApproveResponse,
+  WorkflowNode,
   WorkflowPlanRequest,
   WorkflowPlanResponse,
   WorkflowRepromptNodeRequest,
@@ -22,15 +27,26 @@ import type {
   WorkflowSpec,
   WorkflowStartRunRequest,
   WorkflowStartRunResponse,
+  WorkflowValidationIssue,
   WorkflowValidateRequest,
   WorkflowValidateResponse
 } from "@kelpclaw/workflow-spec";
-import { planWorkflowDraft, repromptWorkflow } from "./planner.js";
+import {
+  createLivePlannerBackend,
+  planMockWorkflowDraft,
+  planWorkflowDraft,
+  repromptWorkflow
+} from "./planner.js";
 import { InMemoryWorkflowStore } from "./store.js";
 import type { RevisionInput } from "./store.js";
+import type { WorkflowPlannerBackend } from "./planner.js";
 
 interface RouteParamsWithId {
   readonly id: string;
+}
+
+interface CodegenRouteParams extends RouteParamsWithId {
+  readonly nodeId: string;
 }
 
 interface RunRouteParams {
@@ -42,12 +58,20 @@ interface ApprovalRequestBody {
   readonly approvedBy: string;
 }
 
+interface CodegenReviewRequestBody {
+  readonly status: "approved" | "rejected";
+  readonly reviewedBy: string;
+  readonly notes?: string | undefined;
+}
+
 interface MockPlanRequestBody {
   readonly name?: string;
 }
 
 export interface ApiAppOptions {
   readonly store?: InMemoryWorkflowStore | undefined;
+  readonly planner?: WorkflowPlannerBackend | undefined;
+  readonly artifactStore?: CodegenArtifactStore | undefined;
 }
 
 export function buildApiApp(options: ApiAppOptions = {}): FastifyInstance {
@@ -55,6 +79,8 @@ export function buildApiApp(options: ApiAppOptions = {}): FastifyInstance {
     logger: false
   });
   const store = options.store ?? new InMemoryWorkflowStore();
+  const artifactStore = options.artifactStore ?? new LocalCodegenArtifactStore();
+  const planner = options.planner ?? createLivePlannerBackend({ artifactStore });
 
   app.get("/health", async () => ({
     status: "ok",
@@ -63,7 +89,7 @@ export function buildApiApp(options: ApiAppOptions = {}): FastifyInstance {
 
   app.post<{ Body: MockPlanRequestBody }>("/api/plans/mock", async (request) => {
     const prompt = request.body?.name ?? gmailReceiptsToSheetsWorkflowFixture.prompt;
-    const workflow = planWorkflowDraft({ prompt });
+    const workflow = planMockWorkflowDraft({ prompt });
 
     return {
       workflow
@@ -73,7 +99,16 @@ export function buildApiApp(options: ApiAppOptions = {}): FastifyInstance {
   app.post<{ Body: WorkflowPlanRequest; Reply: WorkflowPlanResponse }>(
     "/api/workflows/plan",
     async (request, reply) => {
-      const workflow = planWorkflowDraft(request.body);
+      let workflow: WorkflowSpec;
+      try {
+        workflow = await planWorkflowDraft(request.body, planner);
+      } catch (error) {
+        return reply.code(503).send({
+          ok: false,
+          error: "PLANNER_BACKEND_UNAVAILABLE",
+          message: error instanceof Error ? error.message : "Planner backend is unavailable."
+        } as never);
+      }
       const validation = validateWorkflowSpec(workflow);
       if (!validation.ok) {
         return reply.code(500).send({
@@ -167,6 +202,16 @@ export function buildApiApp(options: ApiAppOptions = {}): FastifyInstance {
     "/api/workflows/:id/approvals",
     async (request, reply) => {
       try {
+        const issues = await validateCodegenApprovalReadiness(
+          store.requireWorkflow(request.params.id).workflow,
+          artifactStore
+        );
+        if (issues.length > 0) {
+          return reply.code(409).send({
+            error: issues[0]?.code ?? "WORKFLOW_CODEGEN_REVIEW_REQUIRED",
+            issues
+          });
+        }
         const approvedRevision = store.approveWorkflow(request.params.id, request.body.approvedBy);
         const workflow = approvedRevision.workflow;
         return {
@@ -263,6 +308,18 @@ export function buildApiApp(options: ApiAppOptions = {}): FastifyInstance {
     }
 
     try {
+      const codegenIssues = await validateCodegenApprovalReadiness(
+        validation.workflow,
+        artifactStore
+      );
+      if (codegenIssues.length > 0) {
+        return reply.code(409).send({
+          ok: false,
+          error: codegenIssues[0]?.code ?? "WORKFLOW_CODEGEN_REVIEW_REQUIRED",
+          message: codegenIssues.map((issue) => issue.message).join(", "),
+          issues: codegenIssues
+        } as never);
+      }
       const approvedRevision = store.approveWorkflow(
         request.params.id,
         request.body.approvedBy,
@@ -283,6 +340,126 @@ export function buildApiApp(options: ApiAppOptions = {}): FastifyInstance {
         message: error instanceof Error ? error.message : "Workflow was not found."
       } as never);
     }
+  });
+
+  app.post<{
+    Params: CodegenRouteParams;
+    Body: CodegenReviewRequestBody;
+  }>("/api/workflows/:id/codegen/:nodeId/review", async (request, reply) => {
+    const stored = store.getWorkflow(request.params.id);
+    if (!stored) {
+      return reply.code(404).send({
+        ok: false,
+        error: "WORKFLOW_NOT_FOUND",
+        message: `Workflow '${request.params.id}' was not found.`
+      });
+    }
+
+    const node = stored.workflow.nodes.find((candidate) => candidate.id === request.params.nodeId);
+    if (node?.kind !== "codegen" || !node.codegen) {
+      return reply.code(404).send({
+        ok: false,
+        error: "CODEGEN_NODE_NOT_FOUND",
+        message: `Codegen node '${request.params.nodeId}' was not found.`
+      });
+    }
+
+    const now = new Date().toISOString();
+    const review = {
+      status: request.body.status,
+      reviewedBy: request.body.reviewedBy,
+      reviewedAt: now,
+      ...(request.body.notes === undefined ? {} : { notes: request.body.notes })
+    };
+    const reviewedCodegen = {
+      ...node.codegen,
+      review
+    };
+    const reviewedWorkflow: WorkflowSpec = {
+      ...stored.workflow,
+      approval: null,
+      updatedAt: now,
+      nodes: stored.workflow.nodes.map((candidate) =>
+        candidate.id === node.id
+          ? {
+              ...candidate,
+              config: {
+                ...candidate.config,
+                artifactStatus: request.body.status,
+                reviewedAt: now
+              },
+              codegen: reviewedCodegen
+            }
+          : candidate
+      )
+    };
+    const validation = validateWorkflowSpec(reviewedWorkflow);
+    if (!validation.ok) {
+      return reply.code(422).send({
+        ok: false,
+        error: "CODEGEN_REVIEW_INVALID",
+        message: validation.errors.map((error) => error.code).join(", "),
+        validation
+      });
+    }
+
+    const draftRevision = store.saveDraftRevision(validation.workflow, validation, "validate", {
+      force: true
+    });
+    return {
+      ok: true,
+      workflow: draftRevision.workflow,
+      draftRevision,
+      validation: draftRevision.validation,
+      node: draftRevision.workflow.nodes.find((candidate) => candidate.id === node.id)
+    };
+  });
+
+  app.post<{
+    Params: CodegenRouteParams;
+  }>("/api/workflows/:id/codegen/:nodeId/promote", async (request, reply) => {
+    const stored = store.getWorkflow(request.params.id);
+    if (!stored) {
+      return reply.code(404).send({
+        ok: false,
+        error: "WORKFLOW_NOT_FOUND",
+        message: `Workflow '${request.params.id}' was not found.`
+      });
+    }
+
+    const node = stored.workflow.nodes.find((candidate) => candidate.id === request.params.nodeId);
+    if (node?.kind !== "codegen" || !node.codegen) {
+      return reply.code(404).send({
+        ok: false,
+        error: "CODEGEN_NODE_NOT_FOUND",
+        message: `Codegen node '${request.params.nodeId}' was not found.`
+      });
+    }
+    if (node.codegen.review.status !== "approved") {
+      return reply.code(409).send({
+        ok: false,
+        error: "WORKFLOW_CODEGEN_REVIEW_REQUIRED",
+        message: `Codegen node '${node.id}' must be approved before promotion.`
+      });
+    }
+
+    const skill = createPromotedSkill(stored.workflow, node);
+    const artifact = createGeneratedArtifact({
+      path: `promoted-skills/${skill.id}.json`,
+      content: JSON.stringify(skill, null, 2),
+      contentType: "application/json"
+    });
+    const storedArtifact = await artifactStore.putArtifact(artifact);
+    const loadedSkill = JSON.parse(
+      await artifactStore.readArtifact(storedArtifact.ref)
+    ) as SkillMetadata;
+    const promotedSkill = registerPromotedSkill(loadedSkill);
+
+    return {
+      ok: true,
+      skill: promotedSkill,
+      artifact: storedArtifact.ref
+    };
   });
 
   app.post<{
@@ -308,7 +485,9 @@ export function buildApiApp(options: ApiAppOptions = {}): FastifyInstance {
 
     try {
       const dag = compileWorkflowDag(approvedRevision.workflow);
-      const result = await executeCompiledDag(dag, createNanoClawRunner());
+      const result = await executeCompiledDag(dag, createNanoClawRunner(), {
+        codegenArtifactStore: artifactStore
+      });
       const now = new Date().toISOString();
       const events = result.events ?? createRunEvents(result.nodeResults, now);
       const run = store.saveRun({
@@ -396,7 +575,9 @@ export function buildApiApp(options: ApiAppOptions = {}): FastifyInstance {
 
       try {
         const dag = compileWorkflowDag(workflow);
-        const result = await executeCompiledDag(dag, createNanoClawRunner());
+        const result = await executeCompiledDag(dag, createNanoClawRunner(), {
+          codegenArtifactStore: artifactStore
+        });
         const execution = store.saveExecution({
           id: result.id,
           workflowId: workflow.id,
@@ -439,6 +620,105 @@ function isValidateRequest(input: unknown): input is WorkflowValidateRequest {
     input !== null &&
     "workflow" in input &&
     typeof (input as WorkflowValidateRequest).workflow === "object"
+  );
+}
+
+async function validateCodegenApprovalReadiness(
+  workflow: WorkflowSpec,
+  artifactStore: CodegenArtifactStore
+): Promise<readonly WorkflowValidationIssue[]> {
+  const issues: WorkflowValidationIssue[] = [];
+
+  for (const [index, node] of workflow.nodes.entries()) {
+    if (node.kind !== "codegen" || !node.codegen) {
+      continue;
+    }
+
+    if (node.codegen.review.status !== "approved") {
+      issues.push({
+        code: "WORKFLOW_CODEGEN_REVIEW_REQUIRED",
+        message: `Codegen node '${node.id}' must be reviewed before workflow approval.`,
+        path: ["nodes", index, "codegen", "review", "status"]
+      });
+    }
+
+    for (const artifact of node.codegen.artifacts) {
+      if (!(await artifactStore.verifyArtifact(artifact))) {
+        issues.push({
+          code: "WORKFLOW_CODEGEN_ARTIFACT_DRIFT",
+          message: `Codegen artifact '${artifact.path}' is missing or has hash drift.`,
+          path: ["nodes", index, "codegen", "artifacts"]
+        });
+      }
+    }
+  }
+
+  return issues;
+}
+
+function createPromotedSkill(workflow: WorkflowSpec, node: WorkflowNode): SkillMetadata {
+  const capability = promotionCapability(node);
+
+  return {
+    id: `skill.promoted.${slugify(`${workflow.id}-${node.id}`)}`,
+    name: node.label,
+    version: "1.0.0",
+    description: node.description,
+    deterministic: true,
+    nodeKinds: ["skill"],
+    capabilities: [capability],
+    inputSchema: node.inputs,
+    outputSchema: node.outputs,
+    requiredSecrets: [],
+    adapterDependencies: [],
+    runtimeTemplate: node.runtime,
+    metaprompt: `Select this promoted skill when a workflow asks to ${node.codegen?.latestPrompt ?? node.description}.`,
+    validationRules: [
+      "promoted from an approved codegen node",
+      "fixture output must satisfy the promoted output schema"
+    ],
+    examples: [
+      {
+        id: `example.${slugify(node.id)}`,
+        description: `Fixture for ${node.label}.`,
+        input: defaultFixturePayload(node.inputs),
+        output: defaultFixturePayload(node.outputs)
+      }
+    ],
+    source: "promoted",
+    promotedFromNodeId: node.id
+  };
+}
+
+function promotionCapability(node: WorkflowNode): string {
+  const text =
+    `${node.label} ${node.description} ${node.codegen?.latestPrompt ?? ""}`.toLowerCase();
+  if (text.includes("scrape") || text.includes("status page")) {
+    return "public-status-scrape";
+  }
+  if (text.includes("regex")) {
+    return "regex-parser";
+  }
+  if (text.includes("api")) {
+    return "ad-hoc-api-call";
+  }
+
+  return `promoted-${slugify(node.id)}`;
+}
+
+function defaultFixturePayload(
+  schemas: Readonly<Record<string, unknown>>
+): Readonly<Record<string, unknown>> {
+  return Object.fromEntries(Object.keys(schemas).map((port) => [port, { fixture: true }]));
+}
+
+function slugify(value: string): string {
+  return (
+    value
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/gu, "-")
+      .replace(/^-+|-+$/gu, "")
+      .slice(0, 72) || "generated-skill"
   );
 }
 
