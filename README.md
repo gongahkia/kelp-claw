@@ -1,8 +1,10 @@
 # KelpClaw
 
-KelpClaw is a TypeScript monorepo for deterministic AI workflow design and execution.
+KelpClaw is an Agent Skill Governance Framework with policy, sandboxing, replay, evidence, and audit.
 
-OpenClaw is the editable workflow planner. NanoClaw is the deterministic runtime that compiles approved workflow revisions and executes nodes through a Docker-per-node contract.
+Its core adoption path is simple: run any `SKILL.md`, evaluate it against policy packs, capture replayable execution evidence, and export a static audit bundle that security, compliance, and platform teams can review without running KelpClaw.
+
+OpenClaw remains the editable workflow planner. NanoClaw remains the deterministic runtime that compiles approved workflow revisions and executes nodes through a Docker-per-node contract. The Piranesi-derived code is used as KelpClaw's local evidence subsystem, not as a separate product direction.
 
 ## Workspace Layout
 
@@ -47,7 +49,8 @@ Quickstart, deployment notes for durable SQLite mode, Docker Compose, and produc
 [`docs/security-review-demo.md`](docs/security-review-demo.md),
 [`docs/agent-inventory.md`](docs/agent-inventory.md),
 [`docs/piranesi-integration.md`](docs/piranesi-integration.md),
-[`docs/web-intel.md`](docs/web-intel.md), and
+[`docs/web-intel.md`](docs/web-intel.md),
+[`docs/product-hardening-roadmap.md`](docs/product-hardening-roadmap.md), and
 [`docs/production-readiness.md`](docs/production-readiness.md).
 
 ## Workflow V1 Model
@@ -92,6 +95,9 @@ The built-in skill registry records input and output schemas, required secrets, 
 KelpClaw can analyze and run agent skills in an audit-first mode:
 
 ```console
+$ kelp-claw help
+$ kelp-claw doctor
+$ kelp-claw demo governance --out .kelpclaw/demo/governance
 $ kelp-claw compat ./SKILL.md --policy baseline
 $ kelp-claw policy explain ./SKILL.md --policy baseline
 $ kelp-claw governance report ./SKILL.md --region sg --framework agentic-ai --policy sg-agentic-ai-baseline
@@ -120,6 +126,8 @@ $ kelp-claw inventory scan --root . --policy sg-agentic-ai-baseline --out .kelpc
 $ kelp-claw inventory graph --root . --format markdown --out .kelpclaw/inventory/permissions.md
 $ kelp-claw inventory coverage --root . --format markdown --fail-on high --out .kelpclaw/inventory/coverage.md
 ```
+
+`help` returns the major workflows and command groups as JSON for CLI, docs, and wrappers. `doctor` checks local readiness for demos and live integrations, including Node.js, writable workspace access, built-in policy packs, Git, optional Codex CLI, and Exa/TinyFish environment configuration. `demo governance` creates a complete local handoff in one command: demo skill, input, evidence workspace, imported SARIF finding, signed governance audit bundle, and strict verification result.
 
 `compat` reports detected tools, required secrets, network posture, sandbox profile, and policy findings. `run-skill` writes deterministic local artifacts under `.kelpclaw/runs/<runId>/`, including `skill.json`, `workflow.json`, `bom.json`, `audit.jsonl`, and `policy-decisions.json`. With `--agent codex-cli`, KelpClaw materializes a temporary workspace, invokes `codex exec`, captures stdout/stderr, installs a local hook command for compatible agents, records hook-derived `PreToolUse`/`PostToolUse` events when available, evaluates policy, and stores generated artifact metadata. Planned policy denials block before launch; hook-denied pre-tool events block the run under `--enforce-policy`. `export-audit-bundle` creates a static bundle with an offline `index.html`.
 
